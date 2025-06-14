@@ -1,0 +1,22 @@
+{
+"0":"(sarcastic) who are these people? where are they coming from?",
+"1": "(confused) arrey what are you trying to say???! ",
+"2": "(shy smiling)",
+"3": "(angry) whatever!! whatever!!" ,
+"4": "(sarcastic, mocking) lol you are soo dangerous",
+"5": "(mocking) dancing while saying I got afraid i got afraid",
+"6":"(angry) calling badwords",
+"7": "(comedy crying scene) i am so happy",
+"8": "(out of patience) Abe! please say fast",
+"9": " (saying that someones gone/dead) khatham, tata, bie bie, goodbye, gaya", 
+"10": "(smiles while he says that)I ill do anything, like anything",
+"11": "(comedy advice) when you have money, nothing matters.. this is my astrology",
+"12": "(seriously saying) can i give my dick?",
+"13": "calling bad words" ,
+"14": "crying and saying amazing!!" ,
+"15": "they fucked up, let them",
+"16": "what are you trying to say fucker" ,
+"17": "begging for money scene",
+"18": "Hey Hey ,, u want more?? lol",
+"19": "(point at someone and asking) you understood right? you understood right/ you understood right?"
+}

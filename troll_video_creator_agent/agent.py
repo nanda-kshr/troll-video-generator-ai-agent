@@ -1,122 +1,163 @@
 import base64
 import datetime
+import json
 from zoneinfo import ZoneInfo
-from google.adk.agents import Agent
-from google.cloud import videointelligence
+from google.adk.agents import Agent, LlmAgent
+import ffmpeg
+from google.cloud import speech
 import os
+
+import shutil
 from google.adk.artifacts import InMemoryArtifactService
-from google.adk.agents import LlmAgent
-from google.adk.sessions import InMemorySessionService
 from google.adk.tools import ToolContext
+from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
 from google.adk.tools import FunctionTool
 from google.genai import types
-from typing import Optional
+from typing import Optional, Dict, Any
 import logging
+from google.adk.events import Event, EventActions
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-def create_troll_video(filename: str, tool_context: ToolContext) -> Optional[str]:
-    """
-    Loads a previously saved image artifact and returns its description (placeholder).
-
-    Args:
-        filename: The filename of the artifact to load.
-        tool_context: The context object provided by the ADK framework.
-
-    Returns:
-        A description of the image, or None if not found.
-    """
-
-    print(f"--- Tool: Attempting to load artifact '{filename}' ---")
+def extract_audio(video_path, audio_path):
+    """Extract audio from a video file using FFmpeg."""
     try:
-        # Use the context to load the artifact (latest version)
-        loaded_artifact: Optional[types.Part] = tool_context.load_artifact(filename=filename)
+        stream = ffmpeg.input(video_path)
+        stream = ffmpeg.output(stream, audio_path, acodec='mp3', audio_bitrate='160k')
+        ffmpeg.run(stream)
+        print(f"Audio extracted to {audio_path}")
+    except ffmpeg.Error as e:
+        print(f"Error extracting audio: {e.stderr.decode()}")
+        raise
 
-        if loaded_artifact:
-            print(f"--- Tool: Loaded artifact '{filename}' (mime_type: {loaded_artifact.inline_data.mime_type}) ---")
-            # --- In a real tool, you might send this image data to another model for analysis ---
-            # --- or pass it back to the primary LLM ---
-            # For simplicity, we just return a placeholder description
-            return f"Loaded artifact '{filename}'. It appears to be an image of type {loaded_artifact.inline_data.mime_type}."
-        else:
-            print(f"--- Tool: Artifact '{filename}' not found. ---")
-            return f"Artifact '{filename}' could not be found."
-    except Exception as e:
-        print(f"--- Tool: Error loading artifact: {e} ---")
-        return f"Error loading artifact '{filename}': {e}"
+def transcribe_audio(audio_path, language_code="en-US"):
+    """Transcribe audio with timestamps using Google Cloud Speech-to-Text."""
+    client = speech.SpeechClient()
 
-    
-    video_client = videointelligence.VideoIntelligenceServiceClient()
-    features = [videointelligence.Feature.SPEECH_TRANSCRIPTION]
-    config = videointelligence.SpeechTranscriptionConfig(
-        language_code="en-US", enable_automatic_punctuation=True
+    # If audio is short (<60s), read directly; otherwise, upload to Google Cloud Storage
+    if os.path.getsize(audio_path) < 10_000_000:  # Less than 10MB
+        with open(audio_path, "rb") as audio_file:
+            content = audio_file.read()
+        audio = speech.RecognitionAudio(content=content)
+    else:
+        # Upload to Google Cloud Storage (requires gsutil or google-cloud-storage)
+        # Example: gs://your-bucket/audio.mp3
+        print("Audio too large. Upload to Google Cloud Storage and provide URI.")
+        return
+
+    config = speech.RecognitionConfig(
+        encoding=speech.RecognitionConfig.AudioEncoding.MP3,
+        sample_rate_hertz=16000,  # Adjust if needed (check with ffprobe)
+        language_code=language_code,
+        enable_word_time_offsets=True,  # Enable timestamps
     )
-    video_context = videointelligence.VideoContext(speech_transcription_config=config)
-    # Save the video file to current folder
-    timestamp = datetime.datetime.now(ZoneInfo("UTC")).strftime("%Y%m%d_%H%M%S")
-    filename = f"input_video_{timestamp}.mp4"
-    path = os.path.join(os.getcwd(), filename)
 
-    with open(path, 'wb') as f:
-        f.write(file_data)
-    operation = video_client.annotate_video(
-        request={
-            "features": features,
-            "input_uri": path,
-            "video_context": video_context,
+    # Perform transcription
+    operation = client.long_running_recognize(config=config, audio=audio)
+    print("Transcribing audio...")
+    response = operation.result(timeout=600)  # Timeout after 10 minutes
+    print("Transcribed")
+
+    # Process results
+    transcript_data = []
+    for result in response.results:
+        alternative = result.alternatives[0]
+        transcript = alternative.transcript
+        words = [
+            {
+                "word": word_info.word,
+                "start_time": word_info.start_time.total_seconds(),
+                "end_time": word_info.end_time.total_seconds(),
+            }
+            for word_info in alternative.words
+        ]
+        transcript_data.append({"transcript": transcript, "words": words})
+
+    return transcript_data
+
+
+async def create_troll(filename: str, tool_context: ToolContext) -> None:
+    """
+    Process video input from ADK web UI.
+    
+    Args:
+        filename: The filename of the artifact.
+        document_bytes: Bytes of the uploaded file.
+        tool_context: The context object provided by the ADK framework
+        
+    Returns:
+        A dictionary containing:
+        - status: A string indicating the status of video processing
+        - video: The processed video part (if successful)
+    """
+
+    try:
+        logger.info("Received video input from ADK web UI")
+        audio_file_name= "audio_"+filename+".mp3"
+        extract_audio(filename, audio_file_name)
+        transcript_data = transcribe_audio(audio_file_name)
+        logger.info(f"Transcription data for {transcript_data}:")
+        result=[]
+        for entry in transcript_data:
+            transcript = entry['transcript']
+            words = entry['words']
+            if words:
+                start_time = words[0]['start_time'] 
+                end_time = words[-1]['end_time']    
+                result.append({
+                    'entire_sentence_transcript': transcript.strip(),
+                    'start': start_time,
+                    'end': end_time
+            })
+        
+        artifact_id = f"modified_transcript_{datetime.datetime.now(ZoneInfo('UTC')).isoformat()}.json"
+        tool_context.artifact_service.put(
+            artifact_id=artifact_id,
+            content=json.dumps(result).encode('utf-8'),
+            content_type='application/json'
+        )
+        logger.info(f"Modified transcript saved as artifact: {artifact_id}")
+        
+        return {
+            "status": "Transcript modified successfully",
+            "artifact_id": artifact_id,
+            "modified_data": result
         }
-    )
-
-    print("\nProcessing video for speech transcription.")
-
-    result = operation.result(timeout=600)
-    annotation_results = result.annotation_results[0]
-    for speech_transcription in annotation_results.speech_transcriptions:
-        # The number of alternatives for each transcription is limited by
-        # SpeechTranscriptionConfig.max_alternatives.
-        # Each alternative is a different possible transcription
-        # and has its own confidence score.
-        for alternative in speech_transcription.alternatives:
-            print("Alternative level information:")
-
-            print("Transcript: {}".format(alternative.transcript))
-            print("Confidence: {}\n".format(alternative.confidence))
-
-            print("Word level information:")
-            for word_info in alternative.words:
-                word = word_info.word
-                start_time = word_info.start_time
-                end_time = word_info.end_time
-                print(
-                    "\t{}s - {}s: {}".format(
-                        start_time.seconds + start_time.microseconds * 1e-6,
-                        end_time.seconds + end_time.microseconds * 1e-6,
-                        word,
-                    )
-                )
-
+    except Exception as e:
+        logger.error(f"Error modifying transcript: {str(e)}")
+        return {"status": f"Error modifying transcript: {str(e)}"}
     
-
-
-artifact_service = InMemoryArtifactService()  # Use GcsArtifactService for production
+# Initialize services
+artifact_service = InMemoryArtifactService()
 session_service = InMemorySessionService()
 
-root_agent = Agent(
+# Create the agent with video processing capabilities
+root_agent = LlmAgent(
     name="troll_generator",
     model="gemini-2.0-flash",
     description=(
         "This agent creates troll videos based on user queries. "
+        "It accepts video input from the ADK web UI and processes it to create entertaining content."
     ),
     instruction=(
         "You are a video creation agent that can create troll videos based on user queries. "
+        "You can accept video name input from the ADK web UI and process it to create entertaining content. "
+        "When a user uploads a video, it will be available as a video part in the input."
+        "After creating video, you should return both the status message and the processed video back to the user."
     ),
-    tools=[FunctionTool(func=create_troll_video, name="create_troll_video")]
+    tools=[
+        FunctionTool(create_troll)
+    ]
 )
+#my_agent = (name="artifact_user_agent", model="gemini-2.0-flash")
 
+# Initialize the runner
 runner = Runner(
     agent=root_agent,
     app_name="video_agent_app",
     session_service=session_service,
     artifact_service=artifact_service
 )
+
