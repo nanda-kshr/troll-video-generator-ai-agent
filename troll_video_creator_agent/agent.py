@@ -254,7 +254,7 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
         concat_stream = ffmpeg.input(temp_file_list, f='concat', safe=0)
         concat_stream = ffmpeg.output(
             concat_stream,
-            output_path,
+            "output/"+output_path,
             vcodec='libx264',
             acodec='aac',
             video_bitrate='2000k',
@@ -270,7 +270,7 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
         for segment in [s for s in streams if s.startswith("temp_segment_") or s.startswith("temp_troll_")]:
             os.remove(segment)
 
-        logger.info(f"Merged video saved as {output_path}")
+        logger.info(f"Merged video saved as output/{output_path}")
     except Exception as e:
         logger.error(f"Error merging video: {str(e)}")
         raise
@@ -307,7 +307,8 @@ async def create_troll(filename: str, tool_context: ToolContext) -> Dict[str, An
     """Process video input, add troll clips, and merge videos."""
     try:
         logger.info("Received video input from ADK web UI")
-        audio_file_name = f"audio_{os.path.basename(filename)}.mp3"
+        filename = "sample/"+filename
+        audio_file_name = f"audio/audio_{os.path.basename(filename)}.mp3"
         extract_audio(filename, audio_file_name)
         transcript_data = transcribe_audio(audio_file_name)
         transcript_data= [{'transcript': 'normally I can speak not today having a bit of a hard time this evening', 'words': [{'word': 'normally', 'start_time': 0.3, 'end_time': 1.0}, {'word': 'I', 'start_time': 1.0, 'end_time': 1.1}, {'word': 'can', 'start_time': 1.1, 'end_time': 1.1}, {'word': 'speak', 'start_time': 1.1, 'end_time': 1.7}, {'word': 'not', 'start_time': 1.7, 'end_time': 4.9}, {'word': 'today', 'start_time': 4.9, 'end_time': 5.2}, {'word': 'having', 'start_time': 5.2, 'end_time': 6.1}, {'word': 'a', 'start_time': 6.1, 'end_time': 6.1}, {'word': 'bit', 'start_time': 6.1, 'end_time': 6.3}, {'word': 'of', 'start_time': 6.3, 'end_time': 6.4}, {'word': 'a', 'start_time': 6.4, 'end_time': 6.4}, {'word': 'hard', 'start_time': 6.4, 'end_time': 6.7}, {'word': 'time', 'start_time': 6.7, 'end_time': 6.8}, {'word': 'this', 'start_time': 6.8, 'end_time': 7.2}, {'word': 'evening', 'start_time': 7.2, 'end_time': 7.3}]}, {'transcript': " yeah I'm good I'm good I love everything about you", 'words': [{'word': 'yeah', 'start_time': 11.7, 'end_time': 12.1}, {'word': "I'm", 'start_time': 12.1, 'end_time': 15.1}, {'word': 'good', 'start_time': 15.1, 'end_time': 15.4}, {'word': "I'm", 'start_time': 15.4, 'end_time': 15.5}, {'word': 'good', 'start_time': 15.5, 'end_time': 15.8}, {'word': 'I', 'start_time': 15.8, 'end_time': 19.2}, {'word': 'love', 'start_time': 19.2, 'end_time': 19.2}, {'word': 'everything', 'start_time': 19.2, 'end_time': 19.7}, {'word': 'about', 'start_time': 19.7, 'end_time': 19.9}, {'word': 'you', 'start_time': 19.9, 'end_time': 20.2}]}]
