@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any, List
 import logging
 from google import genai
 from google.cloud import storage 
+from data import TROLL_CLIPS 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,28 +38,7 @@ def upload_to_gcs(source_file_name, destination_blob_name):
 
 
 # Troll clips dataset
-TROLL_CLIPS = {
-    "0 .mp4": "Sarcastic reaction — 'Who even are these people? Where are they coming from?'",
-    "1 .mp4": "Confused tone — 'Arrey, what are you trying to say?!'",
-    "2 .mp4": "Shy, awkward smile — no dialogue, just expressive reaction.",
-    "3 .mp4": "Angry outburst — 'Whatever! Whatever!' (repetitive and dismissive)",
-    "4 .mp4": "Mocking tone — 'LOL, you’re *so* dangerous!' (fake fear)",
-    "5 .mp4": "Mocking dance — saying 'I got scared! I got scared!' while dancing",
-    "6 .mp4": "Angry rant — starts shouting and using swear words",
-    "7 .mp4": "Comedic fake cry — 'I’m sooo happy!' (emotional exaggeration)",
-    "8 .mp4": "Frustrated/impatient — 'Abe! Say it quickly, man!'",
-    "9 .mp4": "Dramatic exit line — 'It’s over. Tata, bye-bye, goodbye!' (farewell expression)",
-    "10 .mp4": "Smiling bravado — 'I’ll do anything. Like, literally anything.'",
-    "11 .mp4": "Comedic life advice — 'When you have money, nothing matters. That’s my astrology.'",
-    "12 .mp4": "Dead-serious absurdity — 'Can I offer my… dick?' (straight-faced)",
-    "13 .mp4": "Sarcastic insults — fake anger while cursing casually",
-    "14 .mp4": "Mock crying — 'Amazing! Just amazing!' (extremely sarcastic)",
-    "15 .mp4": "Sarcastic dismissal — 'They messed it up? Let them. Who cares!'",
-    "16 .mp4": "Annoyed sarcasm — 'What are you trying to say, you idiot?'",
-    "17 .mp4": "Begging skit — fake poverty scene, asking for money with drama",
-    "18 .mp4": "Mocking escalation — 'Ohhh you want *more*? LOL!' (teasing tone)",
-    "19 .mp4": "Pointing repeatedly — 'You got it? You understood? You got it, right?' (intense repetition)"
-}
+
 
 
 def extract_audio(video_path, audio_path):
