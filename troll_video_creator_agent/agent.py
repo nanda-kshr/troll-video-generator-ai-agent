@@ -17,7 +17,7 @@ from typing import Optional, Dict, Any, List
 import logging
 from google import genai
 from google.cloud import storage 
-from data import TROLL_CLIPS 
+from .dataset import TROLL_CLIPS  
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
