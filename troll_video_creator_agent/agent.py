@@ -1,6 +1,7 @@
 import base64
 import datetime
 import json
+import mimetypes
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from google.adk.agents import Agent, LlmAgent
@@ -10,6 +11,8 @@ import os
 import shutil
 from google.adk.tools import ToolContext
 from google.adk.sessions import InMemorySessionService
+from google.adk.artifacts import GcsArtifactService
+
 from google.adk.runners import Runner
 from google.adk.tools import FunctionTool
 from google.genai import types
@@ -24,11 +27,14 @@ logger = logging.getLogger(__name__)
 
 GCS_BUCKET_NAME = "troll_video_gen" # <--- IMPORTANT: Replace with your actual GCS bucket name
 GCS_UPLOAD_FOLDER = "troll_video_gen_audios" # Optional: folder within your bucket
+GCS_OUTPUT_FOLDER = "troll_videos" # Optional: folder within your bucket
 
 def upload_to_gcs(source_file_name, destination_blob_name):
     """Uploads a file to the Google Cloud Storage bucket."""
+   
     storage_client = storage.Client()
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
+
     blob = bucket.blob(destination_blob_name)
 
     blob.upload_from_filename(source_file_name)
@@ -45,19 +51,18 @@ def extract_audio(video_path, audio_path):
     """Extract audio from a video file using FFmpeg."""
     try:
         stream = ffmpeg.input(video_path)
-        stream = ffmpeg.output(stream, audio_path, acodec='mp3', audio_bitrate='160k', ar=44100)
+        stream = ffmpeg.output(stream, audio_path, acodec='mp3', audio_bitrate='160k', ar=44100, loglevel="quiet")
         ffmpeg.run(stream)
-        print(f"Audio extracted to {audio_path}")
+        logger.info(f"Audio extracted to {audio_path}")
     except ffmpeg.Error as e:
-        print(f"Error extracting audio: {e.stderr.decode()}")
+        logger.error(f"Error extracting audio: {e.stderr.decode()}")
         raise
 
 def transcribe_audio(audio_path, language_code="en-US"):
     """Transcribe audio with timestamps using Google Cloud Speech-to-Text."""
     client = speech.SpeechClient()
-
     # Upload to GCS
-    gcs_destination_path = f"{GCS_UPLOAD_FOLDER}/{os.path.basename(audio_path)}"
+    gcs_destination_path = f"{GCS_UPLOAD_FOLDER}{audio_path}"
     gcs_uri = upload_to_gcs(audio_path, gcs_destination_path)
     audio = speech.RecognitionAudio(uri=gcs_uri)
     logger.info(f"Using GCS URI for transcription: {gcs_uri}")
@@ -106,7 +111,7 @@ def transcribe_audio(audio_path, language_code="en-US"):
     logger.info(f"Transcription duration: {total_duration} seconds")
     return transcript_data
 
-def modify_transcript(transcript_data: List[Dict], tool_context: ToolContext) -> Dict[str, Any]:
+def modify_transcript(transcript_data: List[Dict]) -> Dict[str, Any]:
     """Prompt Gemini to add troll clips to the transcript and return updated data."""
     try:
         logger.info("Modifying transcript with troll clips")
@@ -118,11 +123,11 @@ def modify_transcript(transcript_data: List[Dict], tool_context: ToolContext) ->
             "0. Be a little rude and you are free to use bad words trolls from the dataset .\n"
             "1. Analyze the sentiment and context of each sentence (e.g., positive, negative, neutral, sarcastic, comedic).\n"
             "2. Assign a troll clip only when its description matches the sentence's sentiment or context.\n"
-            "3. Do not assign trolls to neutral or very short sentences (less than 3 words) unless they have a clear comedic or mistaken context.\n"
+            "3. Do not assign trolls to neutral or very short sentences (less than 2 words) unless they have a clear comedic or mistaken context.\n"
             "4. Limit troll clips to at most one per every two sentences to avoid overuse.\n"
             "5. Return the transcript with an additional 'troll' field for each sentence, containing the troll clip filename (e.g., '3 .mp4') or None if no troll is added.\n\n"
-            "Transcript:\n" + json.dumps(transcript_data, indent=2) + "\n\n"
             "Troll Clips Dataset:\n" + json.dumps(TROLL_CLIPS, indent=2) + "\n\n"
+            "Transcript:\n" + json.dumps(transcript_data, indent=2) + "\n\n"
             "Example Output:\n"
             "[\n"
             "  {'entire_sentence_transcript': 'Hey how are you? you look so beautiful', 'start': 0, 'end': 2, 'troll': '3 .mp4'},\n"
@@ -147,7 +152,7 @@ def modify_transcript(transcript_data: List[Dict], tool_context: ToolContext) ->
         modified_data = json.loads(response.text.strip().replace("```json", "").replace("```", ""))
         logger.info(f"\n\n\nModified transcript data: {modified_data}\n\n\n")
         # Save modified data to local file
-        modified_file = "modified_transcript.json"
+        modified_file = "/tmp/modified_transcript.json"
         with open(modified_file, "w", encoding="utf-8") as f:
             json.dump(modified_data, f, indent=2)
         logger.info(f"Modified transcript saved to {modified_file}")
@@ -165,7 +170,7 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
     """Cut input video and insert troll clips between segments based on the timeline."""
     try:
         logger.info("Merging video with troll clips")
-        temp_file_list = "concat_list.txt"
+        temp_file_list = "/tmp/concat_list.txt"
         streams = []
 
         # Get input video properties for normalization
@@ -182,13 +187,14 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
             duration = segment["end"] - segment["start"]
 
             # Handle input video segment
-            segment_path = f"temp_segment_{i}.mp4"
+            segment_path = f"/tmp/temp_segment_{i}.mp4"
             stream = ffmpeg.input(video_path, ss=start, t=duration)
             # Re-encode input video segment to ensure consistency
             stream = ffmpeg.output(
                 stream,
                 segment_path,
                 vcodec='libx264',
+                loglevel='quiet',
                 acodec='aac',
                 video_bitrate='2000k',
                 audio_bitrate='192k',
@@ -203,9 +209,9 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
             # Handle troll clip if assigned
             troll = segment.get("troll")
             if troll and troll in TROLL_CLIPS:
-                troll_path = os.path.join("troll_video_creator_agent/trollclips", troll)
+                troll_path = os.path.join("./troll_video_creator_agent/trollclips", troll)
                 if os.path.exists(troll_path):
-                    reencoded_troll = f"temp_troll_{i}.mp4"
+                    reencoded_troll = f"/tmp/temp_troll_{i}.mp4"
                     # Re-encode troll clip to match input video properties
                     stream = ffmpeg.input(troll_path)
                     stream = ffmpeg.output(
@@ -213,6 +219,7 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
                         reencoded_troll,
                         vcodec='libx264',
                         acodec='aac',
+                        loglevel='quiet',
                         video_bitrate='2000k',
                         audio_bitrate='192k',
                         r=input_fps,
@@ -224,6 +231,7 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
                     streams.append(reencoded_troll)
                 else:
                     logger.warning(f"Troll clip {troll_path} not found, skipping")
+                    logger.info(f"Troll clip {troll_path} not found, skipping")
 
         # Write file list for concat
         with open(temp_file_list, "w") as f:
@@ -234,10 +242,11 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
         concat_stream = ffmpeg.input(temp_file_list, f='concat', safe=0)
         concat_stream = ffmpeg.output(
             concat_stream,
-            "output/"+output_path,
+            output_path,
             vcodec='libx264',
             acodec='aac',
             video_bitrate='2000k',
+            loglevel='quiet',
             audio_bitrate='192k',
             map='0',  # Map all streams (video and audio)
             format='mp4',
@@ -250,7 +259,7 @@ def merge_video_with_trolls(video_path: str, timeline: List[Dict], output_path: 
         for segment in [s for s in streams if s.startswith("temp_segment_") or s.startswith("temp_troll_")]:
             os.remove(segment)
 
-        logger.info(f"Merged video saved as output/{output_path}")
+        logger.info(f"Merged video saved as {output_path}")
     except Exception as e:
         logger.error(f"Error merging video: {str(e)}")
         raise
@@ -274,7 +283,8 @@ async def summarize_transcript(modified_file: str) -> Dict[str, Any]:
             "troll_clip_count": troll_count
         }
 
-        logger.info("Summary generated")
+        logger.info("------------------------------------------------------------------------")
+        logger.info(f"Summary: {summary}")
         return {
             "status": "Summary generated successfully",
             "summary": summary
@@ -283,18 +293,39 @@ async def summarize_transcript(modified_file: str) -> Dict[str, Any]:
         logger.error(f"Error summarizing transcript: {str(e)}")
         return {"status": f"Error summarizing transcript: {str(e)}"}
 
-async def create_troll(filename: str, tool_context: ToolContext) -> Dict[str, Any]:
+async def create_troll(tool_context: ToolContext) -> Dict[str, Any]:
     """Process video input, add troll clips, and merge videos."""
     try:
         logger.info("Received video input from ADK web UI")
-        filename = "sample/"+filename
-        audio_file_name = f"audio/audio_{os.path.basename(filename)}.mp3"
-        extract_audio(filename, audio_file_name)
-        transcript_data = transcribe_audio(audio_file_name)
-        transcript_data= [{'transcript': 'normally I can speak not today having a bit of a hard time this evening', 'words': [{'word': 'normally', 'start_time': 0.3, 'end_time': 1.0}, {'word': 'I', 'start_time': 1.0, 'end_time': 1.1}, {'word': 'can', 'start_time': 1.1, 'end_time': 1.1}, {'word': 'speak', 'start_time': 1.1, 'end_time': 1.7}, {'word': 'not', 'start_time': 1.7, 'end_time': 4.9}, {'word': 'today', 'start_time': 4.9, 'end_time': 5.2}, {'word': 'having', 'start_time': 5.2, 'end_time': 6.1}, {'word': 'a', 'start_time': 6.1, 'end_time': 6.1}, {'word': 'bit', 'start_time': 6.1, 'end_time': 6.3}, {'word': 'of', 'start_time': 6.3, 'end_time': 6.4}, {'word': 'a', 'start_time': 6.4, 'end_time': 6.4}, {'word': 'hard', 'start_time': 6.4, 'end_time': 6.7}, {'word': 'time', 'start_time': 6.7, 'end_time': 6.8}, {'word': 'this', 'start_time': 6.8, 'end_time': 7.2}, {'word': 'evening', 'start_time': 7.2, 'end_time': 7.3}]}, {'transcript': " yeah I'm good I'm good I love everything about you", 'words': [{'word': 'yeah', 'start_time': 11.7, 'end_time': 12.1}, {'word': "I'm", 'start_time': 12.1, 'end_time': 15.1}, {'word': 'good', 'start_time': 15.1, 'end_time': 15.4}, {'word': "I'm", 'start_time': 15.4, 'end_time': 15.5}, {'word': 'good', 'start_time': 15.5, 'end_time': 15.8}, {'word': 'I', 'start_time': 15.8, 'end_time': 19.2}, {'word': 'love', 'start_time': 19.2, 'end_time': 19.2}, {'word': 'everything', 'start_time': 19.2, 'end_time': 19.7}, {'word': 'about', 'start_time': 19.7, 'end_time': 19.9}, {'word': 'you', 'start_time': 19.9, 'end_time': 20.2}]}]
+        # Example inputs
+        for key, value in tool_context.user_content:
+            if key == "parts":
+                for i in value:
+                    if i.inline_data:
+                        part = i  
+                        break
+        if not part:
+            logger.error("No valid image part found in user content")
+            return {"status": "No valid image part found in user content"}
+        now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        name= str(part.inline_data.display_name).replace(' ','') + str(now)
+        mime_type = 'video/mp4'
+        video_filename = f"/tmp/{name}.mp4"
+        audio_filename = f"/tmp/{name}.mp3"
+        with open(video_filename, "wb") as f:
+            f.write(part.inline_data.data)
+        extract_audio(video_filename, audio_filename)
+        transcript_data = transcribe_audio(audio_filename)
         
+        
+        
+        #transcript_data = [{'transcript': "But you are a representative of the culture. What in general do they think of American women, do they say we're rude?", 'words': [{'word': 'But', 'start_time': 0.0, 'end_time': 0.3}, {'word': 'you', 'start_time': 0.3, 'end_time': 0.5}, {'word': 'are', 'start_time': 0.5, 'end_time': 0.8}, {'word': 'a', 'start_time': 0.8, 'end_time': 0.9}, {'word': 'representative', 'start_time': 0.9, 'end_time': 1.1}, {'word': 'of', 'start_time': 1.1, 'end_time': 1.7}, {'word': 'the', 'start_time': 1.7, 'end_time': 1.8}, {'word': 'culture.', 'start_time': 1.8, 'end_time': 2.1}, {'word': 'What', 'start_time': 2.1, 'end_time': 2.6}, {'word': 'in', 'start_time': 2.6, 'end_time': 2.8}, {'word': 'general', 'start_time': 2.8, 'end_time': 3.5}, {'word': 'do', 'start_time': 3.5, 'end_time': 3.7}, {'word': 'they', 'start_time': 3.7, 'end_time': 3.9}, {'word': 'think', 'start_time': 3.9, 'end_time': 4.2}, {'word': 'of', 'start_time': 4.2, 'end_time': 4.4}, {'word': 'American', 'start_time': 4.4, 'end_time': 4.9}, {'word': 'women,', 'start_time': 4.9, 'end_time': 5.0}, {'word': 'do', 'start_time': 5.0, 'end_time': 5.5}, {'word': 'they', 'start_time': 5.5, 'end_time': 5.6}, {'word': 'say', 'start_time': 5.6, 'end_time': 5.8}, {'word': "we're", 'start_time': 5.8, 'end_time': 6.0}, {'word': 'rude?', 'start_time': 6.0, 'end_time': 6.6}]}, {'transcript': ' No.', 'words': [{'word': 'No.', 'start_time': 7.7, 'end_time': 8.8}]}, {'transcript': ' Do they say? We talk too much.', 'words': [{'word': 'Do', 'start_time': 12.0, 'end_time': 12.3}, {'word': 'they', 'start_time': 12.3, 'end_time': 12.4}, {'word': 'say?', 'start_time': 12.4, 'end_time': 12.6}, {'word': 'We', 'start_time': 12.6, 'end_time': 12.8}, {'word': 'talk', 'start_time': 12.8, 'end_time': 13.2}, {'word': 'too', 'start_time': 13.2, 'end_time': 13.4}, {'word': 'much.', 'start_time': 13.4, 'end_time': 13.5}]}, {'transcript': ' Animated movie. Animated do they say, we get a lot of divorces that could be a discussion.', 'words': [{'word': 'Animated', 'start_time': 15.2, 'end_time': 15.9}, {'word': 'movie.', 'start_time': 15.9, 'end_time': 16.3}, {'word': 'Animated', 'start_time': 16.3, 'end_time': 17.3}, {'word': 'do', 'start_time': 17.3, 'end_time': 18.1}, {'word': 'they', 'start_time': 18.1, 'end_time': 18.2}, {'word': 'say,', 'start_time': 18.2, 'end_time': 18.4}, {'word': 'we', 'start_time': 18.4, 'end_time': 18.5}, {'word': 'get', 'start_time': 18.5, 'end_time': 18.7}, {'word': 'a', 'start_time': 18.7, 'end_time': 18.8}, {'word': 'lot', 'start_time': 18.8, 'end_time': 18.9}, {'word': 'of', 'start_time': 18.9, 'end_time': 19.1}, {'word': 'divorces', 'start_time': 19.1, 'end_time': 20.0}, {'word': 'that', 'start_time': 20.0, 'end_time': 21.9}, {'word': 'could', 'start_time': 21.9, 'end_time': 22.1}, {'word': 'be', 'start_time': 22.1, 'end_time': 22.2}, {'word': 'a', 'start_time': 22.2, 'end_time': 22.3}, {'word': 'discussion.', 'start_time': 22.3, 'end_time': 22.6}]}]
+        #transcript_data= [{'transcript': 'normally I can speak not today having a bit of a hard time this evening', 'words': [{'word': 'normally', 'start_time': 0.3, 'end_time': 1.0}, {'word': 'I', 'start_time': 1.0, 'end_time': 1.1}, {'word': 'can', 'start_time': 1.1, 'end_time': 1.1}, {'word': 'speak', 'start_time': 1.1, 'end_time': 1.7}, {'word': 'not', 'start_time': 1.7, 'end_time': 4.9}, {'word': 'today', 'start_time': 4.9, 'end_time': 5.2}, {'word': 'having', 'start_time': 5.2, 'end_time': 6.1}, {'word': 'a', 'start_time': 6.1, 'end_time': 6.1}, {'word': 'bit', 'start_time': 6.1, 'end_time': 6.3}, {'word': 'of', 'start_time': 6.3, 'end_time': 6.4}, {'word': 'a', 'start_time': 6.4, 'end_time': 6.4}, {'word': 'hard', 'start_time': 6.4, 'end_time': 6.7}, {'word': 'time', 'start_time': 6.7, 'end_time': 6.8}, {'word': 'this', 'start_time': 6.8, 'end_time': 7.2}, {'word': 'evening', 'start_time': 7.2, 'end_time': 7.3}]}, {'transcript': " yeah I'm good I'm good I love everything about you", 'words': [{'word': 'yeah', 'start_time': 11.7, 'end_time': 12.1}, {'word': "I'm", 'start_time': 12.1, 'end_time': 15.1}, {'word': 'good', 'start_time': 15.1, 'end_time': 15.4}, {'word': "I'm", 'start_time': 15.4, 'end_time': 15.5}, {'word': 'good', 'start_time': 15.5, 'end_time': 15.8}, {'word': 'I', 'start_time': 15.8, 'end_time': 19.2}, {'word': 'love', 'start_time': 19.2, 'end_time': 19.2}, {'word': 'everything', 'start_time': 19.2, 'end_time': 19.7}, {'word': 'about', 'start_time': 19.7, 'end_time': 19.9}, {'word': 'you', 'start_time': 19.9, 'end_time': 20.2}]}]
+        #transcript_data= [{'transcript': 'Normally, I can speak not today having a bit of a hard time this evening.', 'words': [{'word': 'Normally,', 'start_time': 0.3, 'end_time': 1.0}, {'word': 'I', 'start_time': 1.0, 'end_time': 1.1}, {'word': 'can', 'start_time': 1.1, 'end_time': 1.1}, {'word': 'speak', 'start_time': 1.1, 'end_time': 1.7}, {'word': 'not', 'start_time': 1.7, 'end_time': 4.9}, {'word': 'today', 'start_time': 4.9, 'end_time': 5.2}, {'word': 'having', 'start_time': 5.2, 'end_time': 6.1}, {'word': 'a', 'start_time': 6.1, 'end_time': 6.1}, {'word': 'bit', 'start_time': 6.1, 'end_time': 6.3}, {'word': 'of', 'start_time': 6.3, 'end_time': 6.4}, {'word': 'a', 'start_time': 6.4, 'end_time': 6.4}, {'word': 'hard', 'start_time': 6.4, 'end_time': 6.7}, {'word': 'time', 'start_time': 6.7, 'end_time': 6.8}, {'word': 'this', 'start_time': 6.8, 'end_time': 7.2}, {'word': 'evening.', 'start_time': 7.2, 'end_time': 7.3}]}, {'transcript': " Yeah, I'm good, I'm good. I love everything about you.", 'words': [{'word': 'Yeah,', 'start_time': 11.7, 'end_time': 12.1}, {'word': "I'm", 'start_time': 12.1, 'end_time': 15.2}, {'word': 'good,', 'start_time': 15.2, 'end_time': 15.4}, {'word': "I'm", 'start_time': 15.4, 'end_time': 15.6}, {'word': 'good.', 'start_time': 15.6, 'end_time': 15.8}, {'word': 'I', 'start_time': 15.8, 'end_time': 19.1}, {'word': 'love', 'start_time': 19.1, 'end_time': 19.2}, {'word': 'everything', 'start_time': 19.2, 'end_time': 19.7}, {'word': 'about', 'start_time': 19.7, 'end_time': 19.9}, {'word': 'you.', 'start_time': 19.9, 'end_time': 20.2}]}]
         logger.info(f"Transcription data: {transcript_data}")
-
+        
+        
+        
         # Transform transcript data
         result = []
         for entry in transcript_data:
@@ -310,14 +341,20 @@ async def create_troll(filename: str, tool_context: ToolContext) -> Dict[str, An
                 })
 
         # Get total video duration using ffprobe
-        probe = ffmpeg.probe(filename)
+        probe = ffmpeg.probe(video_filename)
         video_duration = float(probe['format']['duration'])
 
-        # Modify transcript with troll clips
-        modify_result = modify_transcript(result, tool_context)
-        #modify_result = {"status": "Transcript modified with troll clips successfully","modified_file": "modified_transcript.json","modified_data": json.loads("""[{"entire_sentence_transcript": "normally I can speak not today having a bit of a hard time this evening","start": 0.3,"end": 7.3,"troll": null},{"entire_sentence_transcript": "yeah I'm good I'm good I love everything about you","start": 11.7,"end": 20.2,"troll": "4 .mp4"}]""")}
         
+        # Modify transcript with troll clips
+        modify_result = modify_transcript(result)
+        
+        
+        
+        #modify_result = {"status": "Transcript modified with troll clips successfully","modified_file": "modified_transcript.json","modified_data": json.loads("""[{"entire_sentence_transcript": "normally I can speak not today having a bit of a hard time this evening","start": 0.3,"end": 7.3,"troll": null},{"entire_sentence_transcript": "yeah I'm good I'm good I love everything about you","start": 11.7,"end": 20.2,"troll": "4 .mp4"}]""")}
+        #modify_result = {'status': 'Transcript modified with troll clips successfully', 'modified_file': '/tmp/modified_transcript.json', 'modified_data': [{'entire_sentence_transcript': "But you are a representative of the culture. What in general do they think of American women, do they say we're rude?", 'start': 0.0, 'end': 6.6, 'troll': '0 .mp4'}, {'entire_sentence_transcript': 'No.', 'start': 7.7, 'end': 8.8, 'troll': None}, {'entire_sentence_transcript': 'Do they say? We talk too much.', 'start': 12.0, 'end': 13.5, 'troll': None}, {'entire_sentence_transcript': 'Animated movie. Animated do they say, we get a lot of divorces that could be a discussion.', 'start': 15.2, 'end': 22.6, 'troll': '1 .mp4'}]}
+
         logger.info(f"Modified transcript data: {modify_result}")
+        
         if "modified_file" not in modify_result:
             return {
                 "status": "Video processed but failed to modify transcript",
@@ -356,17 +393,61 @@ async def create_troll(filename: str, tool_context: ToolContext) -> Dict[str, An
             })
 
         # Merge video with troll clips
-        output_video = f"output_{os.path.basename(filename)}"
-        merge_video_with_trolls(filename, timeline, output_video)
+        output_video = f"/tmp/output_{name}.mp4"
+
+        logger.info(f"Merging video with trolls, video_filename: {video_filename}")
+        logger.info(f"Merging video with trolls, timeline: {timeline}")
+        logger.info(f"Merging video with trolls, output file: {output_video}")
+        merge_video_with_trolls(video_filename, timeline, output_video)
 
         # Summarize the modified transcript
-        summary_result = await summarize_transcript(modified_file)
+        # summary_result = await summarize_transcript(modified_file)
+        # Read the output video file as bytes
+        # Read the output video file as bytes
+        with open(output_video, "rb") as video_file:
+            video_bytes = video_file.read()
+            
+        
+        # Upload the video to Google Cloud Storage
+        gcs_output_path = f"{GCS_OUTPUT_FOLDER}{output_video}"
+        gcs_uri = await upload_to_gcs(output_video, gcs_output_path)
+        logger.info(f"Video uploaded to GCS: {gcs_uri}")
+        
+        # Create artifact with the video bytes
+        result_artifact = types.Part(
+            inline_data=types.Blob(
+                mime_type=mime_type,
+                data=video_bytes
+            )
+        )
+
+        gcs_uri = f'https://storage.googleapis.com/troll_video_gen/troll_videos{output_video}'
+        output_video = await tool_context.save_artifact("output.mp4", artifact=result_artifact)
+
+        # Clean up local files to free space
+        logger.info("Cleaning up local files...")
+
+        # Remove the input video file
+        if os.path.exists(video_filename):
+            os.remove(video_filename)
+            logger.info(f"Deleted input video file: {video_filename}")
+
+        # Remove the extracted audio file
+        if os.path.exists(audio_filename):
+            os.remove(audio_filename)
+            logger.info(f"Deleted audio file: {audio_filename}")
+
+        # Remove the modified transcript JSON file
+        if os.path.exists(modified_file):
+            os.remove(modified_file)
+            logger.info(f"Deleted transcript file: {modified_file}")
+
+
+        logger.info("Local cleanup complete")
 
         return {
             "status": f"Video processed, trolls added, and summarized",
-            "modified_file": modified_file,
-            "output_video": output_video,
-            "summary": summary_result.get("summary", {})
+            "summary":f'Video uploaded to GCS: {gcs_uri}'
         }
 
     except Exception as e:
@@ -379,6 +460,7 @@ async def create_troll(filename: str, tool_context: ToolContext) -> Dict[str, An
 
 # Initialize services
 session_service = InMemorySessionService()
+artifact_service = GcsArtifactService(bucket_name=GCS_BUCKET_NAME)
 
 # Create the agent
 root_agent = LlmAgent(
@@ -390,8 +472,9 @@ root_agent = LlmAgent(
     ),
     instruction=(
         "You are a video creation agent that inserts troll clips into videos based on transcript sentiment. "
-        "Process video input to extract audio, transcribe it, prompt Gemini to add troll clips, merge the video with trolls, "
-        "and summarize the results. Return the status, modified transcript file, output video file, and summary."
+        "Return the status and summary which contains uri to the output video."
+        "If the user uplaoded file is a video, invoke the create_troll tool to process it. "
+        "If you get any error, specify what that error is"
     ),
     tools=[
         FunctionTool(create_troll)
@@ -402,5 +485,6 @@ root_agent = LlmAgent(
 runner = Runner(
     agent=root_agent,
     app_name="video_agent_app",
-    session_service=session_service
+    session_service=session_service,
+    artifact_service=artifact_service,
 )

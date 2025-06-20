@@ -111,3 +111,24 @@ MIT License
 - Google Cloud Platform for Speech-to-Text and Storage services
 - FFmpeg for video processing capabilities
 - Gemini API for AI-powered clip selection 
+
+gcloud run deploy video-creator-agent \
+  --image gcr.io/next-auth-368306/video-creator-agent \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-secrets="/etc/secrets/next-auth-368306-06d969df2de1.json=my-service-account-key:latest" \
+  --project next-auth-368306
+
+adk deploy cloud_run \--project=$GOOGLE_CLOUD_PROJECT \                     
+--region=$GOOGLE_CLOUD_LOCATION \
+--service_name=$SERVICE_NAME \
+--app_name=$APP_NAME \
+--with_ui \
+$AGENT_PATH
+
+gcloud run deploy $SERVICE_NAME \
+  --image YOUR_BUILT_IMAGE_PATH_FROM_STEP_1 \
+  --region $GOOGLE_CLOUD_LOCATION \
+  --allow-unauthenticated \
+  --set-secrets="/etc/secrets/next-auth-368306-06d969df2de1.json=my-service-account-key:latest" \
+  --project $GOOGLE_CLOUD_PROJECT
