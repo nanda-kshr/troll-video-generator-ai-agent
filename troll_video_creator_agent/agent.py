@@ -126,6 +126,7 @@ def modify_transcript(transcript_data: List[Dict]) -> Dict[str, Any]:
             "3. Do not assign trolls to neutral or very short sentences (less than 2 words) unless they have a clear comedic or mistaken context.\n"
             "4. Limit troll clips to at most one per every two sentences to avoid overuse.\n"
             "5. Return the transcript with an additional 'troll' field for each sentence, containing the troll clip filename (e.g., '3 .mp4') or None if no troll is added.\n\n"
+            "6. Use atleast two clips for a 20 seconds transcript"
             "Troll Clips Dataset:\n" + json.dumps(TROLL_CLIPS, indent=2) + "\n\n"
             "Transcript:\n" + json.dumps(transcript_data, indent=2) + "\n\n"
             "Example Output:\n"
@@ -134,7 +135,7 @@ def modify_transcript(transcript_data: List[Dict]) -> Dict[str, Any]:
             "  {'entire_sentence_transcript': 'ok bie', 'start': 2, 'end': 3, 'troll': None}\n"
             "]\n\n"
             "Provide the modified transcript array in JSON format.\n"
-            "Remember to respond with all the sentences in the transcript, even if no troll is added."
+            "Remember to respond with all the sentences in the transcrip in JSON FORMAT"
         )
         load_dotenv()
         
@@ -410,7 +411,7 @@ async def create_troll(tool_context: ToolContext) -> Dict[str, Any]:
         
         # Upload the video to Google Cloud Storage
         gcs_output_path = f"{GCS_OUTPUT_FOLDER}{output_video}"
-        gcs_uri = await upload_to_gcs(output_video, gcs_output_path)
+        gcs_uri = upload_to_gcs(output_video, gcs_output_path)
         logger.info(f"Video uploaded to GCS: {gcs_uri}")
         
         # Create artifact with the video bytes
